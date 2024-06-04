@@ -1,0 +1,92 @@
+stages:
+  - build-tag
+  - report
+
+default:
+  retry:
+    max: 2
+    when: stuck_or_timeout_failure
+
+variables:
+  LOCAL_REPO: http://${GIT_ACCESS_USER}:${PERSONAL_ACCESS_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git
+  REMOTE_REPO: https://${GITHB_ACCESS_USER}:${GITHB_PERSONAL_ACCESS_TOKEN}@${GITHB_CI_SERVER_HOST}/${GITHB_CI_PROJECT_PATH}.git
+  GIT_DEPTH: 50
+
+# github
+.github_add_remote: &github_add_remote
+  - git remote remove github || true
+  - git remote add github ${REMOTE_REPO}
+  - git remote -v
+.github_pull: &github_pull
+  - git pull github ${CI_COMMIT_REF_SLUG}
+  - git log github/${CI_COMMIT_REF_SLUG} --pretty=oneline | head || true
+.github_push: &github_push
+  - git push github HEAD:${CI_COMMIT_REF_SLUG}
+  - git push --tags ${REMOTE_REPO} HEAD:${CI_COMMIT_REF_SLUG}
+
+# gitlab
+.origin_pull: &origin_pull
+  - git fetch --tags
+  - git pull origin ${CI_COMMIT_REF_SLUG}  # need auto merge
+  - git log origin/${CI_COMMIT_REF_SLUG} --pretty=oneline | head || true
+.origin_push: &origin_push
+  - git push ${LOCAL_REPO} HEAD:${CI_COMMIT_REF_SLUG}
+  - git push --tags ${LOCAL_REPO} HEAD:${CI_COMMIT_REF_SLUG}
+.gen_tag: &gen_tag
+  - git tag
+  - TAG=$(git describe --tags $( git rev-list --date-order --max-count=1 --tags ))
+  - echo $TAG
+  - TAG=$(echo $TAG | cut -d '.' -f 1,2).$(($(echo $TAG | cut -d '.' -f 3)+1))
+  - git tag $TAG
+  - echo $TAG
+
+# make a commit
+.make_commit: &make_commit
+  - echo "gen tag ${CI_COMMIT_SHORT_SHA}" >> log
+  - git status
+  - git add .
+  - git commit -m "[skip ci] Auto generated tag by gitlab-ci ${CI_COMMIT_SHORT_SHA}" || true  # ignore bash error
+
+job_build_tag:
+  stage: build-tag
+  image: ${WH}gitlab/dind
+  before_script:
+    - git config --global user.email $GIT_ACCESS_EMAIL
+    - git config --global user.name $GIT_ACCESS_USER
+  script:
+    - ls -alh
+    - *github_add_remote
+    - *github_pull
+    - *origin_pull
+    - *gen_tag
+
+    - *github_push
+    - *origin_push
+  only:
+    - feature-sync-github
+    - feature-build-tag
+    - dev
+
+job_report_success:
+  stage: report
+  image: ${WH}gitlab/dind
+  when: on_success
+  script:
+    - git fetch --tags
+    - git tag
+    - TAG=$(git describe --tags $( git rev-list --date-order --max-count=1 --tags ))
+    - echo $TAG
+    - projectLink=\<${CI_PROJECT_URL}/pipelines\|${CI_PROJECT_NAME}\>
+    - curl "${SLACK_GIT_URL}" -XPOST -H "content-type:application/json" -d "{\"text\":\"✅ shl Tag => \`${TAG}\`\nSuccess ${projectLink} ${CI_COMMIT_REF_SLUG}\n${GITLAB_USER_NAME}\"}"
+  only:
+    - dev
+
+job_report_failure:
+  stage: report
+  image: ${WH}gitlab/dind
+  when: on_failure
+  script:
+    - projectLink=\<${CI_PROJECT_URL}/pipelines\|${CI_PROJECT_NAME}\>
+    - curl "${SLACK_GIT_URL}" -XPOST -H "content-type:application/json" -d "{\"text\":\"🚫 Fail build tag \`${CI_PROJECT_NAME}\`.\nJob:${projectLink}\n\`${GITLAB_USER_NAME}\`\"}"
+  only:
+    - dev
